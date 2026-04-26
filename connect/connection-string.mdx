@@ -68,8 +68,6 @@ postgres://postgres:your-32-byte-hex-secret@your-cluster.teesql.com:5433/yourdb?
 
 `sslcert` and `sslkey` come from `GetTlsKey(usage_client_auth: true)` on your dstack guest agent. The password here is the Postgres superuser password derived from `GetKey(path="pg/superuser")` — a path used by operator-side tooling, not the cluster-secret flow.
 
-{/* TODO: confirm whether end-user clusters expose the `postgres` superuser DSN at all, or whether all customer connections go through the `teesql_read`/`teesql_readwrite` cluster-secret path. The repo shows both flows in different docs. */}
-
 ### Mode C — Behind a dstack gateway
 
 When the cluster CVM sits behind a dstack gateway with ACME-issued public certs, the gateway terminates external TLS and re-establishes RA-TLS internally:

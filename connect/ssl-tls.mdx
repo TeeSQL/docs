@@ -108,13 +108,6 @@ Setting `sslmode=require` or `sslmode=verify-full` on the **forwarder** DSN hand
     ```
   </Tab>
 
-  <Tab title="pgAdmin">
-    {/* TODO: no pgAdmin example found in the repo. The likely shape is `sslmode=verify-full` with paths to the RA-TLS root, client cert, and client key — but pgAdmin's UI only exposes those fields when running on a host that already has a TDX-attested client cert, so the workflow needs confirmation from the team. */}
-  </Tab>
-
-  <Tab title="DBeaver">
-    {/* TODO: no DBeaver example found in the repo. */}
-  </Tab>
 </Tabs>
 
 ## Where the CA certificate comes from
@@ -125,8 +118,6 @@ Two ways to obtain the root for raw `libpq`/`psql` use:
 
 1. **From the cluster operator.** During cluster provisioning, request the KMS root cert PEM and use it as `sslrootcert`.
 2. **From the server's own chain.** The chain is presented during the TLS handshake; tooling that uses the RA-TLS client libraries does not need the root on disk because verification happens against the embedded TDX quote, not a CA chain.
-
-{/* TODO: confirm the operator-side delivery mechanism for the KMS root cert PEM. The repo references it (`ra-tls-ca.pem` in `testing.md`) but does not include a step-by-step distribution flow for end users. */}
 
 For client certificates:
 

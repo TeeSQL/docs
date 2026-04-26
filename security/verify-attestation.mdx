@@ -147,15 +147,11 @@ assert result.tcb_status in {"OK", "SWHardeningNeeded"}
 
 The `/attestation` endpoint binds `REPORTDATA = SHA-256(wal_lsn || controldata_hash || timestamp)`, so the quote also commits to the database's live state at the moment the report was produced — useful when you want to cryptographically pin "what was Postgres doing when you said this."
 
-{/* TODO: there is no dedicated TeeSQL CLI binary for ad-hoc verification today; users assemble the methods above. Confirm with the team whether to ship one (e.g. `teesql verify --host ... --mrtd ...`). */}
-
 ## Verify-before-connect pattern
 
 For most applications, **Method 1 is what you want** — the connection path verifies on every handshake, with a 1-hour cache, so there's no separate "verify" step to forget. Use the explicit verify-before-connect form only when you need to abort early in a code path before any database work is set up:
 
 <Snippet file="verify-before-connect.mdx" />
-
-{/* TODO: confirm this is the recommended layered pattern, or whether teams should rely solely on Method 1 — the libraries already verify on connect, so the pre-flight is mostly defense-in-depth and faster failure for unrelated code paths. */}
 
 ## What to do when verification fails
 
@@ -176,8 +172,6 @@ For exact error strings and additional codes, see [Connection troubleshooting](/
 - **MRTD** is published by the cluster operator when they cut a CVM image. Pin it via `allowedMrTd` (TS) / `allowed_mr_td` (Python) / `allowed_mrtds` (Rust).
 - **RTMR0–3** are returned in every attestation result for inspection but are not pinned by default. Pin them in custom verifier code if you want to lock to a specific kernel + boot configuration.
 - **`compose_hash`** is exposed via `/attestation` and pins the application layer.
-
-{/* TODO: a published source of truth for expected MRTD/RTMR per TeeSQL release (e.g. a release-notes page or signed values file alongside each sidecar image) does not exist yet. Confirm with the team. */}
 
 ## Related
 

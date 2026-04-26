@@ -104,8 +104,6 @@ To pin a measurement (`allowedMrTd`, etc.), you need a known-good value to compa
 - **RTMR1 and RTMR2** are determined by the guest kernel and boot parameters. They change when the kernel image or boot configuration changes.
 - **RTMR3** is determined by the application layer — most importantly the `compose_hash`. It changes whenever the compose definition changes, which in practice means whenever the sidecar or Postgres image is upgraded.
 
-{/* TODO: there is no public published source of truth for the expected MRTD/RTMR values for a given TeeSQL release yet. Confirm with the team where these will be published — likely a release-notes page or a signed values file alongside each sidecar image. */}
-
 For the hands-on procedure — how to read the values from a running cluster, how to pin them in client code, what to do on rotation — see [Verify attestation](/security/verify-attestation).
 
 ## Related
