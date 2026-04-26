@@ -1,14 +1,21 @@
-/* Navbar primary button: bright green bg + dark text, matching landing page */
-a[href*="teesql.com"][class*="bg-primary"],
-nav a[class*="bg-primary"],
-.navbar a[class*="bg-primary"] {
-  background-color: #34d399 !important;
+/* Navbar primary button ("Join waitlist"): bright green bg + dark text in both modes */
+a[href="https://teesql.com"],
+a[href="https://teesql.com"] *,
+header a[href*="teesql.com"],
+header a[href*="teesql.com"] *,
+nav a[href*="teesql.com"],
+nav a[href*="teesql.com"] * {
   color: #0b0d0f !important;
 }
 
-a[href*="teesql.com"][class*="bg-primary"]:hover,
-nav a[class*="bg-primary"]:hover,
-.navbar a[class*="bg-primary"]:hover {
+a[href="https://teesql.com"],
+header a[href*="teesql.com"],
+nav a[href*="teesql.com"] {
+  background-color: #34d399 !important;
+}
+
+a[href="https://teesql.com"]:hover,
+header a[href*="teesql.com"]:hover,
+nav a[href*="teesql.com"]:hover {
   background-color: #4eeeb5 !important;
-  color: #0b0d0f !important;
 }
