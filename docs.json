@@ -82,7 +82,7 @@
   "navbar": {
     "primary": {
       "type": "button",
-      "label": "Join waitlist",
+      "label": "Get early access",
       "href": "https://teesql.com"
     }
   }
