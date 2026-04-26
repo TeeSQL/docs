@@ -1,0 +1,33 @@
+```ts verify-before-connect.ts
+import tls from "node:tls"
+import { extractTdxQuote, IntelApiVerifier } from "prisma-ra-tls"
+
+// 1. Open a TLS socket to the cluster's :5433 endpoint and grab the leaf cert.
+const socket = tls.connect({
+  host: "your-cluster.teesql.com",
+  port: 5433,
+  rejectUnauthorized: false, // RA-TLS is self-signed; trust comes from the quote
+})
+await new Promise<void>((resolve, reject) => {
+  socket.once("secureConnect", resolve)
+  socket.once("error", reject)
+})
+const peerDer = Buffer.from(socket.getPeerCertificate().raw)
+socket.end()
+
+// 2. Extract the TDX quote and verify it before doing anything else.
+const quote = extractTdxQuote(peerDer)
+if (!quote) throw new Error("not a TeeSQL RA-TLS certificate")
+
+const verifier = new IntelApiVerifier()
+const result = await verifier.verify(quote, {
+  allowedMrTd: [process.env.EXPECTED_MRTD!],
+})
+console.log("verified MRTD:", result.mrTd, "TCB:", result.tcbStatus)
+
+// 3. Only after verification passes do you open the actual database connection.
+//    The driver still re-verifies on its own connection — the pre-flight is a
+//    fail-fast guard for code paths where you want to abort before any DB work.
+```
+
+For the standard production path, the RA-TLS client libraries verify automatically on every connection — see [Verify attestation](/security/verify-attestation).

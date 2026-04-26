@@ -1,0 +1,125 @@
+---
+title: "Quickstart"
+description: "Create a TeeSQL database and run your first query in under 5 minutes."
+icon: "rocket"
+keywords: ["quickstart", "psycopg-ra-tls", "prisma-ra-tls", "ra-tls", "connect"]
+---
+
+Connect to a TeeSQL cluster from a Python or TypeScript application, run a query, and (optionally) verify the database's TDX attestation. This page is the happy path; deeper material lives in [Connect](/connect/connection-string) and [Security](/security/overview).
+
+<Steps>
+  <Step title="Prerequisites">
+    - **A TeeSQL cluster.** TeeSQL is in early access — request one on the [waitlist](https://teesql.com). The operator returns a cluster host, a cluster secret, and a database name.
+    - **An Intel TDX environment for your application.** Mutual RA-TLS requires your app to present its own TDX-attested client certificate. In production this means a [dstack](https://github.com/Dstack-TEE/dstack) CVM, Phala Cloud, iExec, or another TDX host. For local development, run the [dstack simulator](https://github.com/Dstack-TEE/dstack/tree/main/sdk/simulator).
+    - **An Intel Trust Authority API key.** Free; register at [portal.trustauthority.intel.com](https://portal.trustauthority.intel.com). Used to verify the database's TDX quote.
+    - **A runtime.** Node.js ≥ 18 with Prisma ≥ 5.10, or Python ≥ 3.10 with psycopg 3.
+  </Step>
+
+  <Step title="Create a database">
+    {/* TODO: self-serve provisioning is not yet available — clusters are provisioned manually for waitlist customers. Confirm the user-facing flow with the team before documenting. */}
+
+    During early access, the TeeSQL operator provisions your cluster and database after you join the waitlist. You receive:
+
+    - A **cluster host** (e.g. `your-cluster.teesql.com`) backed by a signed TXT manifest at `_teesql-leader.<cluster-uuid>.teesql.com`
+    - A **database name**
+    - A **cluster secret** (32-byte hex) — your password for both `teesql_readwrite` and `teesql_read` roles
+  </Step>
+
+  <Step title="Get connection details">
+    The canonical connection string:
+
+    <Snippet file="connection-string.mdx" />
+
+    Set them in your environment:
+
+    ```bash
+    DATABASE_URL=postgresql://teesql_readwrite:your-32-byte-hex-secret@your-cluster.teesql.com:5433/mydb
+    INTEL_TRUST_AUTHORITY_API_KEY=your-ita-key
+    ```
+  </Step>
+
+  <Step title="Connect">
+    Use a TeeSQL RA-TLS client. The client opens a localhost forwarder that terminates mutual RA-TLS to the cluster sidecar; your driver speaks plain Postgres to that forwarder.
+
+    <CodeGroup>
+    ```python connect.py
+    from psycopg_ratls import connect
+    from ra_tls_verify import IntelApiVerifier
+    import os
+
+    verifier = IntelApiVerifier(api_key=os.environ["INTEL_TRUST_AUTHORITY_API_KEY"])
+
+    conn = connect(os.environ["DATABASE_URL"], verifier=verifier)
+    ```
+
+    ```ts connect.ts
+    import { PrismaClient } from "@prisma/client"
+    import { withRaTls, IntelApiVerifier } from "prisma-ra-tls"
+
+    const adapter = await withRaTls(process.env.DATABASE_URL!, {
+      verifier: new IntelApiVerifier(),
+      clientAttestation: true, // present your CVM's TDX client cert
+    })
+
+    export const prisma = new PrismaClient({ adapter })
+    ```
+    </CodeGroup>
+
+    The mutual RA-TLS handshake happens once at process start — keep the connection long-lived, do not re-handshake per query.
+  </Step>
+
+  <Step title="Run a query">
+    <CodeGroup>
+    ```python query.py
+    conn.execute("""
+      CREATE TABLE IF NOT EXISTS notes (
+        id    bigserial PRIMARY KEY,
+        body  text NOT NULL,
+        ts    timestamptz NOT NULL DEFAULT now()
+      )
+    """)
+    conn.execute("INSERT INTO notes (body) VALUES (%s)", ("hello from a CVM",))
+    rows = conn.execute("SELECT id, body, ts FROM notes ORDER BY id DESC LIMIT 5").fetchall()
+    print(rows)
+    ```
+
+    ```ts query.ts
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS notes (
+        id    bigserial PRIMARY KEY,
+        body  text NOT NULL,
+        ts    timestamptz NOT NULL DEFAULT now()
+      )
+    `)
+    await prisma.$executeRaw`INSERT INTO notes (body) VALUES (${"hello from a CVM"})`
+    const rows = await prisma.$queryRaw`SELECT id, body, ts FROM notes ORDER BY id DESC LIMIT 5`
+    console.log(rows)
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Verify attestation (optional)">
+    The client you just used already verified the server's TDX quote against Intel Trust Authority. To pin the exact CVM image you expect, pass an `allowedMrTd` allowlist of MRTD hex values:
+
+    ```ts
+    const adapter = await withRaTls(process.env.DATABASE_URL!, {
+      verifier: new IntelApiVerifier(),
+      allowedMrTd: [process.env.EXPECTED_MRTD!],
+      clientAttestation: true,
+    })
+    ```
+
+    See [Verify attestation](/security/verify-attestation) for the full RTMR/MRTD model and how to pin measurements safely.
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Connection string" icon="plug" href="/connect/connection-string">
+    Roles, ports, the cluster secret, and the leader manifest.
+  </Card>
+  <Card title="Security overview" icon="shield-half" href="/security/overview">
+    The trust model behind mutual RA-TLS.
+  </Card>
+</CardGroup>

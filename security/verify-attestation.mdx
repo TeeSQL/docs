@@ -1,0 +1,187 @@
+---
+title: "Verify attestation"
+description: "Verify that your TeeSQL database is running inside a genuine TEE before — and during — every connection."
+sidebarTitle: "Verify attestation"
+icon: "shield-check"
+keywords: ["attestation", "verify", "mrtd", "rtmr", "intel trust authority", "dcap", "extractTdxQuote"]
+---
+
+Verification is what turns "the database claims to be in a TEE" into a cryptographic fact. Skipping it gives you transport security without any guarantee that the program on the other end is the program you expect — defeating the point of running TeeSQL.
+
+## Why verify
+
+The server's RA-TLS certificate is self-signed and carries a TDX quote in a custom extension. A client that trusts the chain like a normal TLS endpoint trusts no one in particular — it just sees a cert that doesn't chain to a public CA. **Verification means extracting the quote, checking it against Intel's signing chain, and confirming the measurements match what you expect.** Only then is the connection meaningfully attested.
+
+Two failure modes that verification catches and standard TLS does not:
+
+- The CVM image was rotated to one you have not approved (caught by `allowedMrTd` pinning)
+- The CVM is running with TDX debug attributes set, which means the host can inspect its memory (caught by the debug-mode check)
+
+## Prerequisites
+
+- A TeeSQL cluster host and an [Intel Trust Authority](https://portal.trustauthority.intel.com) API key (or use a client library with local DCAP)
+- One of the RA-TLS client libraries: [`prisma-ra-tls`](https://github.com/TeeSQL/prisma-ra-tls), [`psycopg-ra-tls`](https://github.com/TeeSQL/psycopg-ra-tls), [`sqlx-ra-tls`](https://github.com/TeeSQL/sqlx-ra-tls), or the verifier-only package [`ra-tls-verify`](https://github.com/TeeSQL/ra-tls-verify) for Python
+- The expected MRTD value(s) for your cluster's CVM image
+
+## Methods
+
+There are three places verification can happen, all using the same primitives.
+
+### Method 1 — verify atomically during connect (recommended)
+
+The RA-TLS client libraries fold extraction and verification into the connection path. This is the default and the recommended pattern: every new connection re-checks the quote (with caching), and a verification failure surfaces as a connection error before any SQL runs.
+
+<CodeGroup>
+```python connect.py
+from psycopg_ratls import connect
+from ra_tls_verify import IntelApiVerifier, VerifyOptions
+import os
+
+verifier = IntelApiVerifier(api_key=os.environ["INTEL_TRUST_AUTHORITY_API_KEY"])
+options = VerifyOptions(allowed_mr_td=[os.environ["EXPECTED_MRTD"]])
+
+conn = connect(os.environ["DATABASE_URL"], verifier=verifier, options=options)
+```
+
+```ts connect.ts
+import { withRaTls, IntelApiVerifier } from "prisma-ra-tls"
+
+const adapter = await withRaTls(process.env.DATABASE_URL!, {
+  verifier: new IntelApiVerifier(),
+  allowedMrTd: [process.env.EXPECTED_MRTD!],
+  clientAttestation: true,
+})
+```
+
+```rust connect.rs
+use std::sync::Arc;
+use sqlx_ra_tls::{pg_connect_opts_ra_tls, DcapVerifier, RaTlsOptions};
+
+let verifier = Arc::new(DcapVerifier::new());
+let opts = pg_connect_opts_ra_tls(
+    &std::env::var("DATABASE_URL")?,
+    verifier,
+    RaTlsOptions {
+        allowed_mrtds: vec![std::env::var("EXPECTED_MRTD")?],
+        ..Default::default()
+    },
+).await?;
+```
+</CodeGroup>
+
+### Method 2 — verify standalone with SDK primitives
+
+For pre-flight checks, monitoring, or any path that wants to verify without opening a database connection, the same libraries expose the underlying primitives directly.
+
+<CodeGroup>
+```python verify.py
+from ra_tls_verify import extract_tdx_quote, IntelApiVerifier, VerifyOptions
+import asyncio, ssl, socket
+
+# Fetch the leaf cert from the cluster's :5433 endpoint
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+with socket.create_connection(("your-cluster.teesql.com", 5433)) as s:
+    with ctx.wrap_socket(s, server_hostname="your-cluster.teesql.com") as ts:
+        der_cert = ts.getpeercert(binary_form=True)
+
+quote = extract_tdx_quote(der_cert)
+if quote is None:
+    raise RuntimeError("not an RA-TLS certificate")
+
+verifier = IntelApiVerifier(api_key="your-ita-key")
+result = asyncio.run(verifier.verify(quote, VerifyOptions(allowed_mr_td=["abc..."])))
+print("MRTD:", result.mr_td, "TCB:", result.tcb_status)
+```
+
+```ts verify.ts
+import tls from "node:tls"
+import { extractTdxQuote, IntelApiVerifier } from "prisma-ra-tls"
+
+const socket = tls.connect({
+  host: "your-cluster.teesql.com",
+  port: 5433,
+  rejectUnauthorized: false,
+})
+await new Promise<void>((res, rej) => {
+  socket.once("secureConnect", res)
+  socket.once("error", rej)
+})
+const der = Buffer.from(socket.getPeerCertificate().raw)
+socket.end()
+
+const quote = extractTdxQuote(der)
+if (!quote) throw new Error("not an RA-TLS certificate")
+
+const result = await new IntelApiVerifier().verify(quote, {
+  allowedMrTd: [process.env.EXPECTED_MRTD!],
+})
+console.log("MRTD:", result.mrTd, "TCB:", result.tcbStatus)
+```
+</CodeGroup>
+
+The Python `extract_tdx_quote` and TypeScript `extractTdxQuote` are the same primitive: they walk the X.509 extensions looking for OID `1.3.6.1.4.1.62397.1.8` (the current SCALE-encoded attestation), with a fallback to OID `1.3.6.1.4.1.62397.1.1` (legacy raw quote), and return the raw quote bytes (or `null` for a non-RA-TLS cert).
+
+### Method 3 — manual inspection via `/attestation`
+
+The sidecar exposes a JSON attestation report at `GET /attestation` on port `8080`. Useful for dashboards, ad-hoc operator checks, or any monitoring tool that just wants the report without verifying the quote itself.
+
+```bash
+curl -s http://your-cluster.teesql.com:8080/attestation | jq .
+```
+
+The response includes the raw quote (hex), `tcb_info` (MRTD plus RTMR0–3), `postgres_state` (current WAL LSN, `pg_controldata` hash, server version), `app_id`, `compose_hash`, and a unix `timestamp`. To turn this into a trust decision, feed the `quote` field into a verifier:
+
+```python
+import requests, asyncio
+from ra_tls_verify import IntelApiVerifier
+
+report = requests.get("http://your-cluster.teesql.com:8080/attestation").json()
+quote = bytes.fromhex(report["quote"])
+
+verifier = IntelApiVerifier(api_key="your-ita-key")
+result = asyncio.run(verifier.verify(quote))
+assert result.tcb_status in {"OK", "SWHardeningNeeded"}
+```
+
+The `/attestation` endpoint binds `REPORTDATA = SHA-256(wal_lsn || controldata_hash || timestamp)`, so the quote also commits to the database's live state at the moment the report was produced — useful when you want to cryptographically pin "what was Postgres doing when you said this."
+
+{/* TODO: there is no dedicated TeeSQL CLI binary for ad-hoc verification today; users assemble the methods above. Confirm with the team whether to ship one (e.g. `teesql verify --host ... --mrtd ...`). */}
+
+## Verify-before-connect pattern
+
+For most applications, **Method 1 is what you want** — the connection path verifies on every handshake, with a 1-hour cache, so there's no separate "verify" step to forget. Use the explicit verify-before-connect form only when you need to abort early in a code path before any database work is set up:
+
+<Snippet file="verify-before-connect.mdx" />
+
+{/* TODO: confirm this is the recommended layered pattern, or whether teams should rely solely on Method 1 — the libraries already verify on connect, so the pre-flight is mostly defense-in-depth and faster failure for unrelated code paths. */}
+
+## What to do when verification fails
+
+The client libraries treat any verification failure as a hard refusal: no bytes are forwarded to the underlying Postgres driver, the connection error surfaces upward, and the transient verification cache is not populated. The same set of failure modes appears across all three libraries:
+
+| Failure | What it means | Action |
+|---|---|---|
+| Quote extension missing | Server is not a TeeSQL RA-TLS endpoint, or you hit the simulator without `allowSimulator` | Confirm host and port; for dev set `allowSimulator: true` |
+| Intel Trust Authority returned non-2xx | API key invalid, network filtering, or transient ITA outage | Check `INTEL_TRUST_AUTHORITY_API_KEY`, retry, or switch to local DCAP |
+| `tdx_is_debuggable: true` | The CVM was launched with TDX debug attributes — no confidentiality | Operator must redeploy without debug; never set `allowDebugMode: true` in production |
+| TCB status not acceptable | Platform firmware/microcode is out of date | Escalate to the cluster operator; do not bypass |
+| MRTD not in `allowedMrTd` | The CVM image is not the one you approved | Verify the operator's release notes; if intentional, update your allowlist |
+
+For exact error strings and additional codes, see [Connection troubleshooting](/connect/troubleshooting).
+
+## Where to get expected measurements
+
+- **MRTD** is published by the cluster operator when they cut a CVM image. Pin it via `allowedMrTd` (TS) / `allowed_mr_td` (Python) / `allowed_mrtds` (Rust).
+- **RTMR0–3** are returned in every attestation result for inspection but are not pinned by default. Pin them in custom verifier code if you want to lock to a specific kernel + boot configuration.
+- **`compose_hash`** is exposed via `/attestation` and pins the application layer.
+
+{/* TODO: a published source of truth for expected MRTD/RTMR per TeeSQL release (e.g. a release-notes page or signed values file alongside each sidecar image) does not exist yet. Confirm with the team. */}
+
+## Related
+
+- [Remote attestation](/security/remote-attestation)
+- [Trusted execution environments](/security/tee-explainer)
+- [Connection troubleshooting](/connect/troubleshooting)
+- [Client libraries](/connect/client-libraries)

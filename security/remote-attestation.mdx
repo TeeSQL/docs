@@ -1,0 +1,116 @@
+---
+title: "Remote attestation"
+description: "How TeeSQL cryptographically proves the database is running inside a genuine Intel TDX CVM."
+icon: "badge-check"
+keywords: ["attestation", "ra-tls", "tdx", "quote", "rtmr", "mrtd", "dcap", "intel trust authority"]
+---
+
+Remote attestation is the cryptographic proof that the program you are talking to is the program you expect, running on hardware you trust. Every TeeSQL connection completes one before any SQL flows.
+
+The mechanism is **RA-TLS**: the database's TLS certificate is self-signed and embeds an Intel TDX attestation quote in a custom X.509 extension. Your client extracts the quote, verifies it against Intel's signing chain, and only then unblocks the underlying Postgres driver.
+
+## Prerequisites
+
+- Familiarity with [TEEs and Intel TDX](/security/tee-explainer)
+- An [Intel Trust Authority](https://portal.trustauthority.intel.com) API key, or a client library with a built-in local DCAP verifier
+
+## The attestation flow
+
+<Steps>
+  <Step title="The CVM mints an RA-TLS certificate at boot">
+    On startup the TeeSQL sidecar calls `GetTlsKey(usage_ra_tls=true, usage_server_auth=true)` on the dstack guest agent over `/var/run/dstack.sock`. The guest agent:
+
+    1. Generates a fresh keypair
+    2. Asks the Intel TDX module for an attestation quote with `REPORTDATA = SHA-256(public key bytes)`
+    3. Builds a self-signed X.509 leaf certificate whose Subject Public Key Info matches that public key
+    4. Embeds the attestation in a custom certificate extension (Phala RA-TLS OID `1.3.6.1.4.1.62397.1.8` for the current SCALE-encoded `VersionedAttestation`; legacy raw-quote bytes also published at OID `1.3.6.1.4.1.62397.1.1` for backward compatibility)
+    5. Returns the leaf, intermediates, and the dstack KMS root certificate as a PEM chain
+
+    Binding the public key into `REPORTDATA` is what prevents a man-in-the-middle: any substitute certificate would have a different public key, and the quote would no longer match.
+  </Step>
+
+  <Step title="The sidecar serves the cert on :5433">
+    The sidecar parses the chain and private key into rustls types, configures a TLS acceptor that requires client certificates by default in production (`TEESQL_REQUIRE_CLIENT_ATTESTATION=true`), and listens on `0.0.0.0:5433`. Plain Postgres on `127.0.0.1:5432` is reachable only from inside the CVM.
+
+    The same RA-TLS pattern is also exposed over HTTP at `:8080` — `GET /attestation` returns the live attestation report described below.
+  </Step>
+
+  <Step title="The client connects and extracts the quote">
+    During the TLS handshake the client receives the server's self-signed leaf and chain. A standard CA-based check would reject the leaf — RA-TLS clients deliberately disable the default chain check (e.g. node-postgres `rejectUnauthorized: false`) and switch to attestation-based trust:
+
+    1. Take the DER bytes of the leaf certificate
+    2. Walk the X.509 extensions for OID `1.3.6.1.4.1.62397.1.8` (current SCALE-encoded attestation), falling back to OID `1.3.6.1.4.1.62397.1.1` (legacy raw quote) for backward compatibility
+    3. Strip the DER `OCTET STRING` wrapper and decode if needed
+    4. The remaining bytes are the raw TDX quote
+  </Step>
+
+  <Step title="The client verifies the quote">
+    Verification has two paths, and TeeSQL client libraries implement both:
+
+    **Intel Trust Authority (hosted, REST).** The client `POST`s the base64-encoded quote to `https://api.trustauthority.intel.com/appraisal/v2/attest` with an API key, receives a signed JWT, fetches Intel's JWKS at the URL named in the JWT header (`jku`), and verifies the JWT signature with `PS384`/`RS256`. Used by `IntelApiVerifier` in `prisma-ra-tls`, `psycopg-ra-tls`, and `sqlx-ra-tls`.
+
+    **Local DCAP.** The client uses [`dcap-qvl`](https://crates.io/crates/dcap-qvl) (a Rust quote-verification library) with Intel's public PCS or a self-hosted PCCS for platform collateral. No external API call required. Used by `DcapVerifier` in `sqlx-ra-tls` (default).
+
+    Either path produces the same trust decision. Pick ITA when you want a managed verifier and don't mind a third-party dependency on the connection path; pick DCAP when you want self-contained verification or air-gapped operation.
+  </Step>
+
+  <Step title="The client checks specific claims">
+    The verifier returns a structured result; the client library then enforces:
+
+    | Check | Default | What it means |
+    |---|---|---|
+    | `tdx_is_debuggable` is `false` | required | Reject debug TDs — they have no confidentiality |
+    | `tcb_status` is acceptable | required | Accept only `OK`, `SWHardeningNeeded`, `ConfigurationNeeded`, `ConfigurationAndSWHardeningNeeded` |
+    | `tdx_mrtd` is in the configured allowlist | optional | Pin the expected CVM image; mismatch indicates an image swap |
+    | `tdx_rtmr0`–`tdx_rtmr3` available for inspection | always returned | Lower-level measurement registers — see below |
+
+    A failure at any step is a hard refusal: the client library does not pass any bytes to the underlying Postgres driver. From the application's point of view, a verification failure surfaces as an ordinary connection error.
+  </Step>
+
+  <Step title="The result is cached, then bytes flow">
+    On success the verification result is cached (default 1 hour in `prisma-ra-tls`; configurable via `cacheTtlMs`) so subsequent connections in the same process don't hit Intel Trust Authority again. The client library then bridges the now-attested TLS channel to the application's Postgres driver, and SQL can flow normally.
+  </Step>
+</Steps>
+
+## What is in an attestation report
+
+The sidecar's `GET /attestation` endpoint returns a JSON document with the following fields:
+
+| Field | Type | Source |
+|---|---|---|
+| `app_id` | hex string | dstack application identity |
+| `compose_hash` | hex string | SHA-256 of the normalized docker-compose file |
+| `instance_id` | string | Unique identifier for this CVM instance |
+| `quote` | hex string | Raw TDX attestation quote bytes |
+| `tcb_info.mrtd` | hex string | Initial CVM image measurement |
+| `tcb_info.rtmr0` | hex string | Platform configuration |
+| `tcb_info.rtmr1` | hex string | Guest kernel image |
+| `tcb_info.rtmr2` | hex string | Boot parameters and initramfs |
+| `tcb_info.rtmr3` | hex string | Application layer (compose + runtime) |
+| `postgres_state.wal_lsn` | string | Current WAL log sequence number |
+| `postgres_state.controldata_hash` | hex string | SHA-256 of `pg_controldata` output |
+| `postgres_state.pg_version` | string | Server version string |
+| `timestamp` | unix seconds | When the report was produced |
+
+The quote itself binds the request to the database's current state: `REPORTDATA` for `/attestation` is `SHA-256(wal_lsn || controldata_hash || timestamp)`. So the same endpoint produces a fresh quote on every call, and the quote attests not just the CVM identity but a snapshot of Postgres's live state at that moment.
+
+For the **TLS handshake** quote (different from `/attestation`), `REPORTDATA` is `SHA-256(public key)`, which binds the TLS session to the attested identity but does not commit to Postgres state.
+
+## Where expected measurements come from
+
+To pin a measurement (`allowedMrTd`, etc.), you need a known-good value to compare against. There are three production-relevant sources:
+
+- **MRTD** is determined by the CVM image. When the operator cuts a new image, they republish the expected MRTD; clients update their allowlist together with their deployment.
+- **RTMR1 and RTMR2** are determined by the guest kernel and boot parameters. They change when the kernel image or boot configuration changes.
+- **RTMR3** is determined by the application layer — most importantly the `compose_hash`. It changes whenever the compose definition changes, which in practice means whenever the sidecar or Postgres image is upgraded.
+
+{/* TODO: there is no public published source of truth for the expected MRTD/RTMR values for a given TeeSQL release yet. Confirm with the team where these will be published — likely a release-notes page or a signed values file alongside each sidecar image. */}
+
+For the hands-on procedure — how to read the values from a running cluster, how to pin them in client code, what to do on rotation — see [Verify attestation](/security/verify-attestation).
+
+## Related
+
+- [Trusted execution environments](/security/tee-explainer)
+- [Verify attestation](/security/verify-attestation)
+- [SSL & TLS](/connect/ssl-tls)
+- [Connection troubleshooting](/connect/troubleshooting)

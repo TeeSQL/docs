@@ -1,0 +1,50 @@
+---
+title: "What is TeeSQL?"
+description: "A managed confidential PostgreSQL database where even the operator can't read your data."
+icon: "book"
+keywords: ["tdx", "ra-tls", "attestation", "confidential", "postgres"]
+---
+
+TeeSQL is managed PostgreSQL 17 running inside Intel Trust Domain Extensions (TDX) Confidential Virtual Machines (CVMs), orchestrated by [dstack](https://github.com/Dstack-TEE/dstack). Every connection is a mutual Remote Attestation TLS (RA-TLS) handshake, so the database proves its identity to your application before any SQL flows.
+
+## The problem
+
+Every managed database asks you to trust the operator. Cloud providers, DBAs, and anyone with access to the host can read your tables in the clear, because rows live decrypted in memory while queries run. "Encryption at rest" stops cold-disk theft; it does not stop the operator.
+
+## TeeSQL's answer
+
+TeeSQL closes that gap with hardware. Postgres runs inside an Intel TDX CVM, so memory is encrypted by the CPU and unreadable from the hypervisor, host OS, or cloud provider. The data disk is sealed with LUKS2 using a key derived inside a separate Key Management Service (KMS) TEE and bound to the CVM's attested identity; backups are AES-256-GCM encrypted inside the TEE before export. The CVM has no shell, no root, no SSH — a sidecar terminates RA-TLS and is the only path into Postgres.
+
+## Who it's for
+
+- TEE application developers shipping confidential apps on dstack, Phala Cloud, iExec, or Secret Network who need a real database for the secrets their users hand them
+- Teams building on Solidity, Rust, or TypeScript inside CVMs who already attest their compute and want to extend that trust boundary to storage
+- Anyone migrating from a managed Postgres who wants the same wire protocol, drivers, and extensions without granting the operator plaintext access
+
+## How it's different
+
+|  | Traditional Managed DB | TeeSQL |
+|---|---|---|
+| Encrypted in transit | ✅ | ✅ |
+| Encrypted at rest | ✅ | ✅ |
+| Encrypted in use (memory) | ❌ | ✅ |
+| Operator can read your data | Yes | No |
+| Cryptographic proof of integrity | No | Yes |
+| Client-verifiable trust | No | Yes |
+
+Memory encryption is enforced by Intel TDX. Integrity and client verification come from the TDX attestation quote and the RTMR1/RTMR2/RTMR3 measurements checked during the RA-TLS handshake.
+
+## Current status
+
+TeeSQL is in **early access**. Sign up on the [waitlist](https://teesql.com) for the trial at launch.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Create a database and run your first attested query.
+  </Card>
+  <Card title="Security & Trust" icon="shield-half" href="/security/overview">
+    How TDX, RA-TLS, and the KMS keep the operator out.
+  </Card>
+</CardGroup>

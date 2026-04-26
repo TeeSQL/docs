@@ -1,0 +1,122 @@
+---
+title: "Connection string"
+description: "Connection string format, roles, ports, and TLS modes for connecting to a TeeSQL cluster."
+icon: "plug"
+keywords: ["dsn", "database url", "ra-tls", "sslmode", "teesql_read", "teesql_readwrite"]
+---
+
+A TeeSQL cluster speaks the standard PostgreSQL wire protocol on port `5433` behind a mutual RA-TLS proxy. Your application connects with a normal Postgres DSN; how TLS is configured depends on whether you use a TeeSQL RA-TLS client library or raw `psql`/`libpq`.
+
+## Prerequisites
+
+- A provisioned TeeSQL cluster — host, database name, and a 32-byte hex **cluster secret**
+- Your application running inside an Intel TDX CVM (production) or against the [dstack simulator](https://github.com/Dstack-TEE/dstack/tree/main/sdk/simulator) (local dev)
+- One of: [psycopg-ra-tls](https://github.com/TeeSQL/psycopg-ra-tls), [prisma-ra-tls](https://github.com/TeeSQL/prisma-ra-tls), [sqlx-ra-tls](https://github.com/TeeSQL/sqlx-ra-tls), or `psql`/`libpq` configured for mutual TLS
+
+## Canonical format
+
+<Snippet file="connection-string.mdx" />
+
+The username selects the privilege level; the password is the cluster secret. The sidecar terminates the mutual RA-TLS handshake on port `5433`, validates the cluster secret in constant time, and proxies the connection to Postgres on `127.0.0.1:5432` inside the CVM.
+
+## Roles
+
+Two shared Postgres roles are provisioned per cluster:
+
+| Role | Privileges | Authenticated by |
+|---|---|---|
+| `teesql_read` | `SELECT` on `public` schema | The cluster's read secret **or** read-write secret (privilege downgrade is allowed) |
+| `teesql_readwrite` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE` on `public` schema | The cluster's read-write secret only |
+
+There is no per-tenant user isolation today — both secrets are cluster-wide.
+
+## Ports
+
+| Port | Protocol | Exposure |
+|---|---|---|
+| `5432` | Postgres plaintext | Localhost inside the CVM only — never reachable from outside |
+| `5433` | Postgres over mutual RA-TLS | Public — this is what your application connects to |
+| `8080` | HTTP | Sidecar `/health` and `/attestation` endpoints |
+
+## Connection modes
+
+Pick the mode that matches your client.
+
+### Mode A — RA-TLS client library (recommended)
+
+`psycopg-ra-tls`, `prisma-ra-tls`, and `sqlx-ra-tls` open a localhost TCP forwarder that owns the mutual RA-TLS handshake. Your driver speaks plain Postgres to that forwarder, so the **driver-side DSN uses `sslmode=disable`** — the forwarder is the TLS endpoint, not the driver.
+
+```python
+from psycopg_ratls import connect
+from ra_tls_verify import IntelApiVerifier
+
+conn = connect(
+    "postgresql://teesql_readwrite:your-32-byte-hex-secret@your-cluster.teesql.com:5433/mydb",
+    verifier=IntelApiVerifier(api_key="your-ita-key"),
+)
+```
+
+The library substitutes the localhost forwarder into the DSN it hands to psycopg under the hood. Reaching for `sslmode=require` on a forwarder DSN is a known footgun — the driver and the forwarder both try to negotiate TLS and the connection breaks.
+
+### Mode B — Raw libpq with mutual RA-TLS
+
+If you cannot use a TeeSQL client library, point `psql`/`libpq` directly at the sidecar with `sslmode=verify-full` and supply your CVM's RA-TLS client cert:
+
+```text
+postgres://postgres:your-32-byte-hex-secret@your-cluster.teesql.com:5433/yourdb?sslmode=verify-full&sslrootcert=/path/to/ra-tls-ca.pem&sslcert=/path/to/client-cert.pem&sslkey=/path/to/client-key.pem
+```
+
+`sslcert` and `sslkey` come from `GetTlsKey(usage_client_auth: true)` on your dstack guest agent. The password here is the Postgres superuser password derived from `GetKey(path="pg/superuser")` — a path used by operator-side tooling, not the cluster-secret flow.
+
+{/* TODO: confirm whether end-user clusters expose the `postgres` superuser DSN at all, or whether all customer connections go through the `teesql_read`/`teesql_readwrite` cluster-secret path. The repo shows both flows in different docs. */}
+
+### Mode C — Behind a dstack gateway
+
+When the cluster CVM sits behind a dstack gateway with ACME-issued public certs, the gateway terminates external TLS and re-establishes RA-TLS internally:
+
+```text
+postgres://postgres:your-32-byte-hex-secret@db.your-domain.com:5433/yourdb?sslmode=require
+```
+
+`sslmode=require` is sufficient because the public hostname has a normal CA-signed cert.
+
+### Mode D — Local development with the dstack simulator
+
+In simulator mode the sidecar disables client-attestation enforcement, so plain `psql` works:
+
+```bash
+psql "host=localhost port=5433 user=postgres sslmode=require dbname=postgres"
+```
+
+Use `sslmode=require`, **not** `verify-full` — the simulator's RA-TLS cert is self-signed against a non-CA chain.
+
+## Environment variable pattern
+
+Standard Postgres tooling reads `DATABASE_URL`. TeeSQL adds one variable for the attestation verifier:
+
+```bash
+DATABASE_URL=postgresql://teesql_readwrite:your-32-byte-hex-secret@your-cluster.teesql.com:5433/mydb
+INTEL_TRUST_AUTHORITY_API_KEY=your-ita-key
+# Optional: pin the expected database CVM measurement
+EXPECTED_MRTD=0abc123...
+```
+
+## Connection pooling
+
+TeeSQL does not bundle PgBouncer or any pooler today. Open a small number of long-lived connections and hold them open: the mutual RA-TLS handshake is expensive (dstack guest agent + Intel Trust Authority + manifest verification) and is meant to happen once per process, not per query.
+
+## Verify
+
+A quick sanity check that the DSN, secret, and role match:
+
+```bash
+psql "postgresql://teesql_read:your-32-byte-hex-secret@your-cluster.teesql.com:5433/mydb" -c "SELECT current_user, current_database();"
+```
+
+You should see `teesql_read` and your database name. Authentication failures return a generic `authentication_failed` — no detail is leaked about which field was wrong.
+
+## Related
+
+- [Quickstart](/quickstart)
+- [Security overview](/security/overview)
+- [Verify attestation](/security/verify-attestation)

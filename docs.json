@@ -1,0 +1,89 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "TeeSQL",
+  "description": "Confidential PostgreSQL — encrypted in transit, at rest, and in use.",
+  "colors": {
+    "primary": "#34d399",
+    "light": "#34d399",
+    "dark": "#34d399"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "background": {
+    "color": {
+      "dark": "#0b0d0f",
+      "light": "#ffffff"
+    }
+  },
+  "fonts": {
+    "heading": {
+      "family": "Outfit",
+      "weight": 600
+    },
+    "body": {
+      "family": "Outfit",
+      "weight": 400
+    }
+  },
+  "favicon": "/favicon.ico",
+  "icons": {
+    "library": "lucide"
+  },
+  "metadata": {
+    "timestamp": true
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "assistant",
+      "mcp",
+      "add-mcp"
+    ]
+  },
+  "navigation": {
+    "pages": [
+      "index",
+      "introduction",
+      "quickstart",
+      {
+        "group": "Connect",
+        "pages": [
+          "connect/connection-string",
+          "connect/ssl-tls",
+          "connect/client-libraries",
+          "connect/troubleshooting"
+        ]
+      },
+      {
+        "group": "Security",
+        "pages": [
+          "security/overview",
+          "security/tee-explainer",
+          "security/remote-attestation",
+          "security/verify-attestation",
+          "security/encryption"
+        ]
+      },
+      {
+        "group": "Concepts",
+        "pages": [
+          "concepts/glossary"
+        ]
+      }
+    ]
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "button",
+      "label": "Join waitlist",
+      "href": "https://teesql.com"
+    }
+  }
+}

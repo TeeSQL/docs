@@ -1,0 +1,70 @@
+---
+title: "Security overview"
+description: "How TeeSQL protects data with TDX hardware memory encryption, LUKS at rest, and mutual RA-TLS in transit."
+icon: "shield-half"
+keywords: ["security", "tdx", "ra-tls", "luks", "kms", "attestation"]
+---
+
+TeeSQL replaces "trust the operator" with "verify the hardware". Postgres 17 runs inside an Intel TDX Confidential Virtual Machine (CVM) orchestrated by [dstack](https://github.com/Dstack-TEE/dstack); the data disk is sealed with a key the operator never sees; and every connection to port `5433` completes a mutual Remote Attestation TLS (RA-TLS) handshake before a single byte of SQL is exchanged. The result: a managed Postgres where the cloud provider, the host OS, the hypervisor, and the TeeSQL team itself cannot read your data in cleartext.
+
+## The three layers
+
+TeeSQL composes three independent encryption layers. Each one defends against a different adversary, and a compromise of one does not unlock the others.
+
+### 1. Encrypted in transit
+
+External clients reach the cluster on port `5433` only. The sidecar terminates a **mutual RA-TLS** handshake — the server presents a self-signed X.509 certificate with a TDX attestation quote in a custom extension (Phala RA-TLS OID `1.3.6.1.4.1.62397.1.8`, with `.1.1` accepted as a legacy raw-quote fallback), and the client must present an equivalent attested certificate of its own. Plain Postgres on `5432` is bound to localhost inside the CVM and is not reachable from outside.
+
+The TLS public key is bound to the quote via the `REPORTDATA` field, so a man-in-the-middle cannot substitute a different certificate without invalidating the attestation. See [SSL & TLS](/connect/ssl-tls) and [Remote attestation](/security/remote-attestation).
+
+### 2. Encrypted at rest
+
+The CVM's data disk is encrypted with **LUKS2 using the `aes-xts-plain64` cipher**. The disk encryption key is supplied by the dstack KMS — derived deterministically from the cluster's attested identity via HKDF over a per-node KMS root key — and only ever exists inside enclave memory. If the CVM moves to different hardware, the KMS re-derives the same key after re-attestation. The key never appears in plaintext on disk, in logs, or in any operator-accessible system.
+
+Backups and WAL segments use a separate cipher: **AES-256-GCM** with a 32-byte cluster-shared key (also KMS-derived), encrypted **inside** the TEE before being uploaded to untrusted storage. The storage layer is treated as adversarial — that is the point.
+
+### 3. Encrypted in use
+
+Intel TDX encrypts the CVM's RAM with keys held inside the CPU. Memory pages belonging to the Trust Domain are unreadable from the hypervisor, the host OS, the cloud provider's management plane, and any other workload on the machine — the protection is enforced by silicon, not by software policy. SQL queries, cached pages, transaction state, and the disk encryption key itself all live inside this protected memory while Postgres is running.
+
+TDX is not a silver bullet — side-channel research against TDX is active, and a state-level adversary with hardware access to the chip is outside the threat model. For protection against operators, cloud providers, and software-level attackers, TDX is the strongest commercially available option today.
+
+## Trust model summary
+
+|  | Traditional Managed DB | TeeSQL |
+|---|---|---|
+| Encrypted in transit | Yes | Yes (mutual RA-TLS) |
+| Encrypted at rest | Yes | Yes (LUKS2, KMS-derived key) |
+| Encrypted in use (memory) | No | Yes (Intel TDX) |
+| Operator can read your data | Yes | No — enforced by hardware |
+| Cryptographic proof of integrity | No | Yes — TDX quote + RTMR0–3 |
+| Client-verifiable trust | No | Yes — verify the quote against Intel Trust Authority or local DCAP |
+
+## What this protects against — and what it does not
+
+Inside the threat model:
+
+- A compromised host OS or hypervisor reading CVM memory or the on-disk LUKS device
+- A cloud provider operator extracting environment variables, cached pages, or backup blobs from the host
+- A malicious TeeSQL operator attempting to issue queries the cluster is not authorised for
+- A man-in-the-middle on the network between your application and the cluster
+
+Outside the threat model:
+
+- A state-level hardware adversary with physical access to the TDX chip
+- A vulnerability in the TDX silicon itself — TeeSQL layers RTMR-based attestation and KMS-derived keys so that a single TDX bypass does not automatically expose data, but no current TEE protects against a complete TDX break
+- An attacker who has compromised the customer's own CVM — the database trusts an attested client, so a compromised client at the application layer is your problem to solve
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="Remote attestation" icon="badge-check" href="/security/remote-attestation">
+    How TDX quotes, RTMRs, and the RA-TLS extension prove the database is what it claims to be.
+  </Card>
+  <Card title="Verify attestation" icon="shield-check" href="/security/verify-attestation">
+    Pin MRTD measurements, choose between Intel Trust Authority and local DCAP, and reject debug or out-of-date TDs.
+  </Card>
+  <Card title="Encryption" icon="lock" href="/security/encryption">
+    LUKS2 at rest, AES-256-GCM for backups, KMS-derived keys, and key rotation under failover.
+  </Card>
+</CardGroup>

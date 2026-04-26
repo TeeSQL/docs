@@ -1,0 +1,165 @@
+---
+title: "Connection troubleshooting"
+description: "Diagnose and fix common errors when connecting to a TeeSQL cluster."
+icon: "wrench"
+keywords: ["error", "troubleshooting", "ra-tls", "attestation", "manifest", "tcb", "mrtd"]
+---
+
+Most TeeSQL connection failures fall into three categories: **DSN/TLS misconfiguration** (the connection never reaches the cluster), **attestation rejection** (the connection reaches the cluster but the verifier refuses the quote), and **authentication rejection** (the cluster sidecar doesn't accept your role/secret). This page lists the exact error strings emitted by the open-source clients and the cluster sidecar, with the fix for each.
+
+If your error is not listed, the most useful next step is to enable verbose logging on whichever RA-TLS client library you use and read the first error in the stack — later errors are usually downstream consequences.
+
+## Prerequisites
+
+- The connection details from the [Connection string](/connect/connection-string) page
+- Access to your application's logs (the RA-TLS client library prints to stderr by default)
+- For operator-side issues, access to the cluster sidecar's `/health` and `/attestation` endpoints on port `8080`
+
+<AccordionGroup>
+  <Accordion title="Intel Trust Authority API key required">
+    ```text
+    Intel Trust Authority API key required. Pass { apiKey } option or set
+    INTEL_TRUST_AUTHORITY_API_KEY env var. Register at
+    https://portal.trustauthority.intel.com
+    ```
+
+    `IntelApiVerifier` could not find an API key. Set `INTEL_TRUST_AUTHORITY_API_KEY` in your environment, or pass `{ apiKey }` explicitly. The service is free — register at [portal.trustauthority.intel.com](https://portal.trustauthority.intel.com).
+  </Accordion>
+
+  <Accordion title="prisma-ra-tls v0.3 requires a URI-form DSN">
+    ```text
+    prisma-ra-tls v0.3 requires a URI-form DSN (postgresql://user:pw@host:port/db)
+    ```
+
+    You passed a key/value DSN (e.g. `host=… port=…`). Switch to URI form: `postgresql://teesql_readwrite:your-32-byte-hex-secret@your-cluster.teesql.com:5433/mydb`.
+  </Accordion>
+
+  <Accordion title="upstream cert has no TDX attestation extension">
+    ```text
+    upstream cert has no TDX attestation extension;
+    set allowSimulator: true for non-TEE targets
+    ```
+
+    The server presented a normal X.509 cert without the RA-TLS attestation extension. Either you are pointing at a non-TeeSQL host, or you are running against the dstack simulator without telling the client. For dev: pass `allowSimulator: true` (TS) / `allow_simulator=True` (Python) / `allow_simulator: true` (Rust). For production: confirm the host and port are correct — port `5433` on a TeeSQL CVM, not `5432`.
+  </Accordion>
+
+  <Accordion title="TDX TD is in debug mode — connection refused">
+    ```text
+    TDX TD is in debug mode — connection refused.
+    Debug TDs have no confidentiality guarantees.
+    Set allowDebugMode: true to override (not recommended for production).
+    ```
+
+    The database CVM is running with TDX debug attributes set. Debug TDs can be inspected by the host and provide no confidentiality. The fix is operator-side: the cluster must be redeployed with debug mode off. Never set `allowDebugMode: true` in production.
+  </Accordion>
+
+  <Accordion title="Unacceptable TCB status">
+    ```text
+    Unacceptable TCB status: "OutOfDate".
+    Acceptable statuses: OK, SWHardeningNeeded, ConfigurationNeeded, ConfigurationAndSWHardeningNeeded.
+    Update the platform firmware/microcode or check Intel's advisory.
+    ```
+
+    The platform's Trusted Computing Base — firmware and microcode — is out of date or has an open security advisory. The fix is on the host operator: update microcode and reboot. From the client side, escalate to the cluster operator rather than work around it.
+  </Accordion>
+
+  <Accordion title="MRTD is not in the allowlist">
+    ```text
+    MRTD "91a0563f0c…c3d2" is not in the allowlist.
+    Update allowedMrTd if you intentionally upgraded the CVM image.
+    ```
+
+    The database CVM's MRTD measurement does not match any value in your `allowedMrTd` / `allowed_mrtds` allowlist. Either the operator rolled out a new CVM image (legitimate — update your allowlist with the new MRTD published by the operator) or you are connecting to a different cluster than expected (illegitimate — stop, do not bypass).
+  </Accordion>
+
+  <Accordion title="Manifest signature verification failed / manifest expired">
+    ```text
+    manifest signature verification failed
+    manifest expired
+    ```
+
+    The leader manifest at `_teesql-leader.your-cluster.teesql.com` (DNS TXT) failed signature or freshness checks. Causes:
+
+    - Wrong `manifest_signer_address` configured for the cluster (most common — recheck against the operator's value)
+    - The dns-controller has stopped publishing fresh manifests; ask the operator to verify the controller is running
+    - Local clock skew is so large that a freshly signed manifest looks expired
+  </Accordion>
+
+  <Accordion title="cert chain verification failed">
+    ```text
+    cert chain verification failed
+    ```
+
+    The server's RA-TLS cert chain does not anchor to the expected dstack KMS root. Either the cluster's KMS root rotated and your client is pinned to the old one, or you are talking to a CVM that is not the TeeSQL cluster you think it is. Refresh the KMS root from the operator before assuming the cluster is compromised.
+  </Accordion>
+
+  <Accordion title="password authentication failed">
+    ```text
+    password authentication failed
+    ```
+
+    The sidecar did not recognise your cluster secret for the role you requested. Check:
+
+    - The role in the DSN is `teesql_read` or `teesql_readwrite` (no other roles authenticate via cluster secret)
+    - The password is the **cluster secret** as a 64-character hex string, not the Postgres password
+    - Privilege downgrade is allowed (the read-write secret authenticates as `teesql_read`) but upgrade is not (the read secret cannot authenticate as `teesql_readwrite`)
+  </Accordion>
+
+  <Accordion title="pg_auth_inject failed: early eof">
+    ```text
+    pg_auth_inject failed: early eof
+    ```
+
+    The sidecar authenticated your secret but Postgres itself rejected the role. The most common cause is that the operator's cluster bring-up did not provision `teesql_read` or `teesql_readwrite`. Ask the operator to re-provision the role.
+  </Accordion>
+
+  <Accordion title="connection refused (peer 127.0.0.1)">
+    ```text
+    connection refused (peer 127.0.0.1)
+    ```
+
+    The localhost RA-TLS forwarder did not start. The first error higher in the stack is the real one — usually the dstack guest agent is unreachable. Check that:
+
+    - In production, `/var/run/dstack.sock` is mounted into your container
+    - In dev, the dstack simulator is running and `DSTACK_SIMULATOR_ENDPOINT` (or your library's equivalent) points at it
+  </Accordion>
+
+  <Accordion title="upstream TLS handshake timed out">
+    ```text
+    upstream TLS handshake timed out after 5000ms
+    ```
+
+    The RA-TLS handshake to port `5433` did not complete in time. Likely causes: network filtering between your CVM and the cluster, the cluster CVM is not running, or the dstack gateway is misconfigured for SNI. Verify with `curl http://your-cluster.teesql.com:8080/health` — if `/health` is reachable but `:5433` is not, the issue is at the proxy/gateway layer.
+  </Accordion>
+
+  <Accordion title="TLS handshake failed (raw psql/libpq)">
+    ```text
+    WARN TLS handshake failed
+    ```
+
+    Direct `psql`/`libpq` connections fail when `sslmode` does not match the cert chain on the wire. In simulator mode the RA-TLS cert is self-signed and not chainable to a public CA, so use `sslmode=require` rather than `sslmode=verify-full`. In production, supply `sslrootcert=<ra-tls-ca.pem>` together with `sslmode=verify-full`.
+  </Accordion>
+</AccordionGroup>
+
+{/* TODO: expand troubleshooting based on user-reported issues as they come in */}
+
+## Quick health checks
+
+Two endpoints on the cluster sidecar are useful for narrowing down whether the cluster itself is healthy before suspecting your client:
+
+```bash
+# Liveness — should return 200
+curl -s http://your-cluster.teesql.com:8080/health
+
+# Full attestation payload — quote, MRTD, RTMR0–3, postgres state
+curl -s http://your-cluster.teesql.com:8080/attestation | jq .
+```
+
+If `/health` is failing, the issue is the cluster, not your connection.
+
+## Related
+
+- [Connection string](/connect/connection-string)
+- [SSL & TLS](/connect/ssl-tls)
+- [Client libraries](/connect/client-libraries)
+- [Verify attestation](/security/verify-attestation)

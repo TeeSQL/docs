@@ -1,0 +1,11 @@
+```text
+postgresql://teesql_readwrite:your-32-byte-hex-secret@your-cluster.teesql.com:5433/mydb
+```
+
+| Field | Value |
+|---|---|
+| Role | `teesql_readwrite` (read + write) or `teesql_read` (read-only on a secondary) |
+| Password | Your cluster secret — a 64-character hex string (32 bytes). The sidecar replaces it on-wire with the KMS-derived Postgres password after verifying your TDX quote. |
+| Host | Your cluster's leader endpoint (resolved from the signed TXT manifest at `_teesql-leader.your-cluster.teesql.com`). |
+| Port | `5433` — the mutual RA-TLS proxy. Postgres itself listens on `5432` inside the CVM and is not exposed. |
+| Database | The database name created on your cluster. |

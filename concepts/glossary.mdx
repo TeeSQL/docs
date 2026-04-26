@@ -1,0 +1,147 @@
+---
+title: "Glossary"
+description: "Definitions of TeeSQL, dstack, and confidential-computing terms used across the docs."
+icon: "book-open"
+keywords: ["glossary", "terms", "definitions", "tee", "tdx", "ra-tls", "kms"]
+---
+
+Terms used across these docs and the TeeSQL stack, alphabetised. If you see a term in the codebase that's not here, treat that as a doc bug worth filing.
+
+### AES-256-GCM
+
+A symmetric authenticated encryption cipher used for encrypting data plus an integrity tag. TeeSQL uses AES-256-GCM for **backup** streams (base backups and WAL segments) before they leave the CVM for untrusted blob storage.
+
+### aes-xts-plain64
+
+A symmetric block-cipher mode designed for full-disk encryption, parameterised over 512-byte sectors. TeeSQL uses it as the LUKS2 cipher for the Postgres data disk inside the CVM.
+
+### App ID (`app_id`)
+
+A dstack-assigned identifier for a deployed application, exposed in the sidecar's `/attestation` response and in the X.509 extension at OID `1.3.6.1.4.1.62397.1.3` of every RA-TLS certificate. Server-side enforcement of an `app_id` allowlist is one of the optional gates the sidecar applies to incoming client connections.
+
+### Attestation
+
+The process of a TEE producing a signed claim about itself — what code it is running, on what hardware, in what state — and a remote party verifying that claim against the chip vendor's signing chain. TeeSQL performs mutual attestation on every connection so neither side trusts the other on faith.
+
+### Attestation quote (TDX quote)
+
+The signed binary report produced by an Intel TDX CPU that describes the Trust Domain's measurements (MRTD, RTMR0–3) and platform state. TeeSQL's sidecar embeds the quote in its TLS certificate (RA-TLS) and exposes it through the `/attestation` HTTP endpoint.
+
+### Cluster secret
+
+A 32-byte hex value the cluster operator issues per cluster, used as the password for the `teesql_read` and `teesql_readwrite` roles. The sidecar verifies it with constant-time comparison and substitutes the KMS-derived Postgres password on the wire — your application never sees the actual database password.
+
+### `compose_hash`
+
+The SHA-256 of the normalised docker-compose definition that boots the CVM. It identifies the application layer of the deployment and is published in the `/attestation` response so a verifier can confirm a CVM is running the expected service stack.
+
+### CVM (Confidential Virtual Machine)
+
+A virtual machine whose memory is encrypted by the CPU and isolated from the hypervisor. TeeSQL's database runs inside one CVM; clients ideally also run inside their own CVM so mutual RA-TLS proves both endpoints.
+
+### DCAP (Data Center Attestation Primitives)
+
+Intel's set of libraries and platform components for verifying TDX/SGX quotes locally, without contacting an Intel-hosted REST service. TeeSQL's Rust client (`sqlx-ra-tls`) uses DCAP via [`dcap-qvl`](https://crates.io/crates/dcap-qvl) by default; the Python wheel is pending.
+
+### DSN (Data Source Name)
+
+A connection-string format. TeeSQL DSNs are URI-form: `postgresql://teesql_readwrite:<cluster-secret>@<host>:5433/<db>` — the `postgres://` scheme works equivalently.
+
+### dstack
+
+The open-source confidential-computing framework used to orchestrate TeeSQL's CVMs, originally built by Phala and stewarded by the Linux Foundation. dstack handles CVM lifecycle, key management, attestation, and gateway routing for everything that runs inside a TeeSQL cluster.
+
+### dstack guest agent
+
+A small process running inside every dstack CVM that exposes attestation, key-derivation, and TLS-key APIs over a Unix socket at `/var/run/dstack.sock`. The TeeSQL sidecar talks to it on every boot to obtain RA-TLS certificates and KMS-derived keys.
+
+### dstack simulator
+
+A local-development substitute for the dstack guest agent and TDX hardware, run as a separate process on a developer machine. TeeSQL's RA-TLS client libraries accept simulator connections only when `allowSimulator` is explicitly set, and the sidecar relaxes mutual-TLS enforcement when it detects `DSTACK_SIMULATOR_ENDPOINT` in its environment.
+
+### HKDF (HMAC-based Key Derivation Function)
+
+A two-step function (extract + expand) for deriving cryptographically distinct keys from a shared secret. The dstack KMS uses HKDF-SHA256 with salt `"RATLS"` to derive every per-cluster, per-purpose key inside its enclave.
+
+### Intel TDX (Intel Trust Domain Extensions)
+
+The CPU instruction-set extension that creates Trust Domains: confidential VMs whose memory and CPU state are encrypted and isolated from everything else on the machine. TeeSQL is built on TDX — the hardware seal is what makes "the operator cannot read your data" a fact rather than a promise.
+
+### Intel Trust Authority (ITA)
+
+Intel's hosted REST attestation-verification service. TeeSQL's `IntelApiVerifier` (in all three RA-TLS client libraries) submits TDX quotes to ITA, receives a signed JWT, and checks it against Intel's published JWKS — the alternative to local DCAP verification.
+
+### KMS (Key Management Service)
+
+A dedicated attested TEE instance that derives and serves cryptographic keys for other TEEs based on their attested identity. TeeSQL relies on the dstack KMS for the disk encryption key, the backup encryption key, the Postgres role passwords, and the RA-TLS keypairs — no human ever holds plaintext.
+
+### LUKS2 (Linux Unified Key Setup, version 2)
+
+A standard Linux disk-encryption format. TeeSQL's data disk is a LUKS2 volume with the `aes-xts-plain64` cipher and a PBKDF2 keyslot, set up at first boot using a key the dstack KMS derives from the cluster's attested identity.
+
+### MRTD (Measurement of Trust Domain)
+
+A SHA-384 fingerprint of a CVM's initial image, computed by the TDX module at launch and embedded in every quote the TD produces. TeeSQL clients pin known-good MRTD values via `allowedMrTd` to detect image swaps.
+
+### Mutual RA-TLS
+
+An RA-TLS handshake in which both endpoints present TDX-attested certificates, so each side cryptographically proves its TEE identity to the other. TeeSQL requires mutual RA-TLS in production — your application must run inside a CVM and present its own attested client cert before any SQL flows.
+
+### `pg_controldata` / `controldata_hash`
+
+`pg_controldata` is the PostgreSQL utility that prints a database cluster's control file (database state, WAL settings, version). The sidecar's `/attestation` response includes a SHA-256 of its output as `controldata_hash` so a verifier can pin Postgres's structural state alongside the TDX quote.
+
+### Phala
+
+Phala Network is the team that originally built dstack and operates Phala Cloud, a TDX-capable hosting environment for dstack workloads. TeeSQL clusters run on Phala Cloud or any other dstack-compatible host that has Intel TDX hardware.
+
+### PostgreSQL (Postgres)
+
+The standard open-source relational database. TeeSQL ships unmodified Postgres 17 inside the CVM — same wire protocol, same drivers, same extensions; only the trust model around it changes.
+
+### RA-TLS (Remote Attestation TLS)
+
+A TLS variant in which the server's certificate is self-signed and embeds a hardware attestation quote in a custom X.509 extension, so trust comes from verifying the quote rather than walking a CA chain. TeeSQL's `:5433` proxy speaks RA-TLS in mutual mode by default — the client extracts the quote, verifies it (Intel Trust Authority or DCAP), and only then unblocks the underlying Postgres driver.
+
+### `REPORTDATA`
+
+A 64-byte field inside a TDX quote that the requesting program fills with its own data, which the CPU then signs along with the measurements. RA-TLS sets `REPORTDATA = SHA-256(public key)` to bind the TLS key to the quote; the sidecar's `/attestation` endpoint sets `REPORTDATA = SHA-256(wal_lsn || controldata_hash || timestamp)` to also attest live database state.
+
+### RTMR (Runtime Measurement Register)
+
+One of four (RTMR0–RTMR3) software-extensible measurement registers inside a TDX Trust Domain, hashed forward via SHA-384 as new code or data is loaded. In TeeSQL's stack RTMR1 records the guest kernel, RTMR2 the boot parameters, and RTMR3 the application layer; RTMR0 captures platform configuration.
+
+### Sidecar
+
+In TeeSQL, the Rust process that runs inside the CVM alongside Postgres and is the only network-reachable endpoint. It terminates mutual RA-TLS on `:5433`, injects the KMS-derived Postgres password on the wire, exports encrypted backups, and serves health and attestation endpoints on `:8080`.
+
+### SNI passthrough
+
+A gateway mode in which the proxy forwards the raw TLS bytes to a backend after parsing only the Server Name Indication, instead of terminating TLS itself. TeeSQL connections through a dstack gateway use SNI passthrough so the mutual RA-TLS handshake terminates inside the database CVM, not at the gateway.
+
+### TCB (Trusted Computing Base)
+
+The platform firmware, microcode, and TDX module versions that the attestation chain depends on. The verifier checks the quote's `tcb_status` and rejects it unless the platform reports `OK`, `SWHardeningNeeded`, `ConfigurationNeeded`, or `ConfigurationAndSWHardeningNeeded`.
+
+### TD (Trust Domain)
+
+The TDX-level term for "a confidential VM" — the isolated execution context the CPU protects. In casual TeeSQL prose `CVM` and `TD` refer to the same thing; `TD` is what the Intel documentation calls it.
+
+### TEE (Trusted Execution Environment)
+
+The general category of CPU-enforced isolated execution contexts — Intel TDX, AMD SEV-SNP, Intel SGX, ARM CCA, and others. TeeSQL targets Intel TDX today; the architecture is portable to any TEE that produces an attestable quote with equivalent semantics.
+
+### `teesql_read` / `teesql_readwrite`
+
+The two PostgreSQL roles every TeeSQL cluster provisions. `teesql_read` has read-only access to the `public` schema; `teesql_readwrite` has full DML plus `CREATE`. The role you specify in your DSN, combined with the cluster secret, determines the privileges of the connection.
+
+### WAL (Write-Ahead Log)
+
+PostgreSQL's append-only journal of every change before it's applied. TeeSQL exposes the current `wal_lsn` (log sequence number) in the sidecar's `/attestation` response as part of `postgres_state`, and uses encrypted WAL segments as the unit for point-in-time recovery from backup storage.
+
+## Related
+
+- [What is TeeSQL?](/introduction)
+- [Trusted execution environments](/security/tee-explainer)
+- [Remote attestation](/security/remote-attestation)
+- [Encryption](/security/encryption)

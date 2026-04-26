@@ -1,0 +1,178 @@
+---
+title: "Client libraries"
+description: "TeeSQL RA-TLS client libraries for TypeScript, Python, and Rust, plus ORM integration notes."
+icon: "code"
+keywords: ["psycopg-ra-tls", "prisma-ra-tls", "sqlx-ra-tls", "ra-tls-verify", "client", "sdk"]
+---
+
+TeeSQL speaks the standard PostgreSQL wire protocol, so any Postgres driver connects once the mutual RA-TLS handshake is established. The libraries listed here add the **attestation layer**: they fetch a TDX-attested client certificate, verify the database's TDX quote, and only then bridge bytes to the driver. Use them whenever your application code must refuse to query an unattested database.
+
+## Prerequisites
+
+- Your application running inside an Intel TDX CVM (or against the dstack simulator for local dev)
+- A connection string — see [Connection string](/connect/connection-string)
+- An [Intel Trust Authority](https://portal.trustauthority.intel.com) API key, **or** the local DCAP verifier (Rust today; Python wheel pending)
+
+## Standard Postgres compatibility
+
+Any standard Postgres client works against TeeSQL once TLS is configured correctly — see [SSL & TLS](/connect/ssl-tls). Such clients **do not verify the database's TDX attestation**; they only verify the X.509 chain, which means a misconfigured operator could swap the backing CVM without the client noticing. Use a TeeSQL RA-TLS library when that matters.
+
+## RA-TLS client libraries
+
+| Language | Package | Driver | Verifier(s) |
+|---|---|---|---|
+| TypeScript / Node.js | [`prisma-ra-tls`](https://github.com/TeeSQL/prisma-ra-tls) | Prisma + `pg` | `IntelApiVerifier`, `NoopVerifier`, custom |
+| Python | [`psycopg-ra-tls`](https://github.com/TeeSQL/psycopg-ra-tls) | psycopg 3 | `IntelApiVerifier`, `NoopVerifier` (DCAP wheel pending) |
+| Rust | [`sqlx-ra-tls`](https://github.com/TeeSQL/sqlx-ra-tls) | sqlx 0.8 + Postgres | `DcapVerifier` (default, local), `IntelApiVerifier`, `NoopVerifier` |
+
+All three share the same shape: a localhost TCP forwarder owns the mutual RA-TLS handshake, your driver speaks plain Postgres to that forwarder, the handshake happens once at process start.
+
+### Minimal example
+
+<CodeGroup>
+```python connect.py
+from psycopg_ratls import connect
+from ra_tls_verify import IntelApiVerifier
+import os
+
+verifier = IntelApiVerifier(api_key=os.environ["INTEL_TRUST_AUTHORITY_API_KEY"])
+
+conn = connect(os.environ["DATABASE_URL"], verifier=verifier)
+rows = conn.execute("SELECT current_user, current_database()").fetchall()
+print(rows)
+```
+
+```ts connect.ts
+import { PrismaClient } from "@prisma/client"
+import { withRaTls, IntelApiVerifier } from "prisma-ra-tls"
+
+const adapter = await withRaTls(process.env.DATABASE_URL!, {
+  verifier: new IntelApiVerifier(),
+  allowedMrTd: [process.env.EXPECTED_MRTD!],
+  clientAttestation: true,
+})
+
+export const prisma = new PrismaClient({ adapter })
+```
+
+```rust connect.rs
+use std::sync::Arc;
+use sqlx::postgres::PgPoolOptions;
+use sqlx_ra_tls::{pg_connect_opts_ra_tls, DcapVerifier, RaTlsOptions};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let verifier = Arc::new(DcapVerifier::new());
+    let opts = pg_connect_opts_ra_tls(
+        &std::env::var("DATABASE_URL")?,
+        verifier,
+        RaTlsOptions {
+            allowed_mrtds: vec![std::env::var("EXPECTED_MRTD")?],
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let pool = PgPoolOptions::new().max_connections(5).connect_with(opts).await?;
+    let (n,): (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
+    println!("SELECT 1 -> {n}");
+    Ok(())
+}
+```
+</CodeGroup>
+
+### Development verifiers
+
+In simulator mode the database's certificate is self-signed and there is no TDX quote to verify. All three libraries ship a `NoopVerifier` for this case — never use it in production.
+
+<CodeGroup>
+```python dev.py
+from psycopg_ratls import connect
+from ra_tls_verify import NoopVerifier
+
+conn = connect(
+    "postgresql://teesql_readwrite:test-secret@localhost:5433/postgres",
+    verifier=NoopVerifier(),
+    allow_simulator=True,
+)
+```
+
+```ts dev.ts
+import { withRaTls, NoopVerifier } from "prisma-ra-tls"
+
+const adapter = await withRaTls(process.env.DATABASE_URL!, {
+  verifier: new NoopVerifier(),
+  allowSimulator: true,
+})
+```
+
+```rust dev.rs
+use sqlx_ra_tls::{pg_connect_opts_ra_tls, NoopVerifier, RaTlsOptions};
+
+let opts = pg_connect_opts_ra_tls(
+    &std::env::var("DATABASE_URL")?,
+    Arc::new(NoopVerifier::new()),
+    RaTlsOptions { allow_simulator: true, ..Default::default() },
+).await?;
+```
+</CodeGroup>
+
+## ORM integration
+
+### Prisma
+
+`prisma-ra-tls` is a [Prisma driver adapter](https://www.prisma.io/docs/orm/overview/databases/database-drivers). Enable the preview feature in `schema.prisma`:
+
+```prisma schema.prisma
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+```
+
+Install peer dependencies:
+
+```bash
+npm install prisma-ra-tls pg @prisma/adapter-pg
+```
+
+Pass the adapter when constructing `PrismaClient` (see the TypeScript example above). Requires Node.js ≥ 18 and Prisma ≥ 5.10.
+
+{/* TODO: no Drizzle, TypeORM, Sequelize, Knex, or SQLAlchemy integrations exist yet. Confirm with the team before documenting any of these. */}
+
+## Verification options
+
+Each library exposes the same knobs for pinning the database identity:
+
+| Option | Purpose |
+|---|---|
+| `allowedMrTd` / `allowed_mrtds` | Hex MRTD allowlist — the measurement of the database CVM image. Always pin in production. |
+| `allowDebugMode` / `allow_debug_mode` | Accept TDs marked debuggable. Never enable in production. |
+| `allowSimulator` / `allow_simulator` | Accept a self-signed cert with no TDX quote. Never enable in production. |
+| `clientAttestation` / forwarder default | Present a TDX-attested client certificate from `/var/run/dstack.sock`. |
+| `cacheTtlMs` (TS) | How long a successful verification is reused. Default 1 hour. |
+
+See [Verify attestation](/security/verify-attestation) for how to derive the right MRTD value for your cluster.
+
+## Verifier-only libraries
+
+If you need to verify a TDX quote without going through a database driver — for example, to check the sidecar's `/attestation` endpoint — use the verification primitives directly:
+
+- **Python**: [`ra-tls-verify`](https://github.com/TeeSQL/ra-tls-verify) — `extract_tdx_quote`, `IntelApiVerifier`, `NoopVerifier`. The Python `DcapVerifier` wheel is pending.
+- **Rust**: [`ra-tls-parse`](https://github.com/TeeSQL/ra-tls-parse) for cert/chain parsing into `rustls` types; quote verification via `dcap-qvl` (used internally by `sqlx-ra-tls`).
+
+## Worked example
+
+[`teesql-example-python`](https://github.com/TeeSQL/teesql-example-python) is a runnable FastAPI app that demonstrates the production shape: two long-lived psycopg connections (`teesql_readwrite` for writes, `teesql_read` for a polling task), `OperationalError` reconnect-once on failover, and a WebSocket fan-out backed by the secondary. Fork it as the starting point for your own service.
+
+## Related
+
+- [Connection string](/connect/connection-string)
+- [SSL & TLS](/connect/ssl-tls)
+- [Verify attestation](/security/verify-attestation)
+- [Quickstart](/quickstart)

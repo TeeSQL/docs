@@ -1,0 +1,14 @@
+/* Navbar primary button: bright green bg + dark text, matching landing page */
+a[href*="teesql.com"][class*="bg-primary"],
+nav a[class*="bg-primary"],
+.navbar a[class*="bg-primary"] {
+  background-color: #34d399 !important;
+  color: #0b0d0f !important;
+}
+
+a[href*="teesql.com"][class*="bg-primary"]:hover,
+nav a[class*="bg-primary"]:hover,
+.navbar a[class*="bg-primary"]:hover {
+  background-color: #4eeeb5 !important;
+  color: #0b0d0f !important;
+}
